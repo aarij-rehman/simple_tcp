@@ -16,10 +16,9 @@ class Streamer:
 
     def send(self, data_bytes: bytes) -> None:
         """Note that data_bytes can be larger than one packet."""
-        # Your code goes here!  The code below should be changed!
-
-        # for now I'm just sending the raw application-level data in one UDP payload
-        self.socket.sendto(data_bytes, (self.dst_ip, self.dst_port))
+        byte_list = self.__byte_breaker(data_bytes, 1472)
+        for i in byte_list:
+            self.socket.sendto(i, (self.dst_ip, self.dst_port))
 
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""
@@ -35,3 +34,7 @@ class Streamer:
            the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
         pass
+    
+    def __byte_breaker(self, b: bytes, s: int):
+        return [b[i:i+s] for i in range(0, len(b), s)]
+        

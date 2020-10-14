@@ -23,8 +23,8 @@ class Streamer:
         self.buffer = {}
         # Thread management
         self.closed = False
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.listen = executor.submit(self.listener)
+        self.executor =  concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.thread = self.executor.submit(self.listener)
 
     def send(self, data_bytes: bytes) -> None:
         byte_ls = self.__byte_breaker(data_bytes, 1468)
@@ -46,25 +46,26 @@ class Streamer:
         """Cleans up. It should block (wait) until the Streamer is done with all
            the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
-        # Send FIN message to let TCP know to close the connection
-        self.__send_fin()
         self.closed = True
         self.socket.stoprecv()
+        while not self.thread.done():
+            time.sleep(0.01)
+        print(self.thread.cancel())
+        self.executor.shutdown()
 
     def listener(self):
-        while not self.closed:  
+        while not self.closed: 
             try:
                 data, addr = self.socket.recvfrom()
-                seq, seg = self.__unpacker(data)
-                # Upon receipt of FIN flag, end process
-                if seq == -1:
-                    print('closing')
-                    return
+                if data:
+                    seq, seg = self.__unpacker(data)
                 self.buffer[seq] = seg
             except Exception as e:
                 print("listener died!")
                 print(e)
-    
+        print ('the thread has returned ')
+        return 
+
     def __byte_breaker(self, b: bytes, s: int):
         return [b[i:i+s] for i in range(0, len(b), s)]
 

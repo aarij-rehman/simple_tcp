@@ -25,12 +25,17 @@ class Streamer:
         self.closed = False
         self.executor =  concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self.thread = self.executor.submit(self.listener)
+        # ACK management
+        self.ACK = {}
 
     def send(self, data_bytes: bytes) -> None:
         byte_ls = self.__byte_breaker(data_bytes, 1468)
         for data in byte_ls:
-            to_send = self.__packer(self.current_sending_SEQ, data)
+            to_send = self.__packer(self.current_sending_SEQ, data, ack=False)
             self.socket.sendto(to_send, (self.dst_ip, self.dst_port))
+            # Wait for acknowledgement
+            while self.current_sending_SEQ not in self.ACK:
+                time.sleep(0.01)
             self.current_sending_SEQ += 1
 
     def recv(self) -> bytes:
@@ -50,16 +55,16 @@ class Streamer:
         self.socket.stoprecv()
         while not self.thread.done():
             time.sleep(0.01)
-        print(self.thread.cancel())
         self.executor.shutdown()
 
     def listener(self):
         while not self.closed: 
             try:
                 data, addr = self.socket.recvfrom()
-                if data:
-                    seq, seg = self.__unpacker(data)
-                self.buffer[seq] = seg
+                if not data: return
+                # Unpack data
+                seq, seg, ack = self.__unpacker(data)
+                self.__packet_handler(seq, seg, ack)
             except Exception as e:
                 print("listener died!")
                 print(e)
@@ -69,13 +74,25 @@ class Streamer:
     def __byte_breaker(self, b: bytes, s: int):
         return [b[i:i+s] for i in range(0, len(b), s)]
 
-    def __packer(self, seq, data) -> struct:
-        f = f'i {len(data)}s'
-        return struct.pack(f, seq, data)
+    def __packer(self, seq, data, ack=False) -> struct:
+        f = f'i {len(data)}s b'
+        return struct.pack(f, seq, data, ack)
     
     def __unpacker(self, packed) -> tuple:
-        f = f'i {len(packed)-4}s'
+        f = f'i {len(packed)-5}s b'
         return struct.unpack(f, packed)
+
+    def __packet_handler(self, seq, seg, ack):
+        if ack:
+            self.ACK[seq] = True
+        else:
+            self.buffer[seq] = seg
+            self.__send_ACK(seq)
+
+    def __send_ACK(self, seq):
+        f = 'i s b'
+        s = struct.pack(f, seq, b'a', True)
+        self.socket.sendto(s, (self.dst_ip, self.dst_port))
 
     def __send_fin(self) -> None:
         FIN = struct.pack('i 4s', -1, b'done')

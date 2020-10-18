@@ -38,8 +38,25 @@ class Streamer:
         # Pipelining
         self.sending_buffer = {}
 
+        # Extra Credit 
+        self.all_data = b""
+        self.first_time = True
+
     def send(self, data_bytes: bytes) -> None:
-        byte_ls = self.__byte_breaker(data_bytes, 1456)
+        if self.first_time:
+            Timer(0.01, self.wave_check, [len(data_bytes)]).start()
+            self.first_time = False
+        self.all_data += data_bytes
+        
+
+    def wave_check(self, num):
+        print('hello')
+        if len(self.all_data) > num:
+            return Timer(0.5, self.wave_check, [len(self.all_data)]).start()
+        return self.send_data()
+
+    def send_data(self):
+        byte_ls = self.__byte_breaker(self.all_data, 1456)
         for data in byte_ls:
             to_send = self.__packer(self.packing_seq, data, ack=False)
             self.sending_buffer[self.packing_seq] = to_send
@@ -77,7 +94,6 @@ class Streamer:
             except Exception as e:
                 print("listener died!")
                 print(e)
-        print ('the thread has returned ')
         return 
 
 #### HELPERS #####

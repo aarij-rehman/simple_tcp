@@ -1,6 +1,7 @@
 import struct
 import time
 import concurrent.futures
+from threading import Timer
 import sys
 from zlib import adler32
 # do not import anything else from loss_socket besides LossyUDP
@@ -20,13 +21,13 @@ class Streamer:
 
         # Parameters for managing order
         self.current_receiving_SEQ = 0
-        self.current_sending_SEQ = 0
+        self.packing_seq = 0
         self.buffer = {}
 
         # Thread management
         self.closed = False
-        self.executor =  concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self.thread = self.executor.submit(self.listener)
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.listen_thread = self.executor.submit(self.listener)
 
         # ACK management
         self.ACK = {}
@@ -34,15 +35,17 @@ class Streamer:
         # FIN handshake 
         self.FIN = False # has the other party sent the fin message yet?
 
+        # Pipelining
+        self.sending_buffer = {}
+
     def send(self, data_bytes: bytes) -> None:
         byte_ls = self.__byte_breaker(data_bytes, 1456)
         for data in byte_ls:
-            to_send = self.__packer(self.current_sending_SEQ, data, ack=False)
-            self.socket.sendto(to_send, (self.dst_ip, self.dst_port))
-            # Wait for acknowledgement
-            self.__wait_ACK(data)
-            self.current_sending_SEQ += 1
-
+            to_send = self.__packer(self.packing_seq, data, ack=False)
+            self.sending_buffer[self.packing_seq] = to_send
+            self.__recursive_send(self.packing_seq)
+            self.packing_seq += 1
+       
     def recv(self) -> bytes:
         """Blocks (waits) if no data is ready to be read from the connection."""      
         # If the desired packet is already in the buffer, return it. Othwerise, wait.
@@ -51,7 +54,6 @@ class Streamer:
         self.current_receiving_SEQ += 1
         return self.buffer.pop(self.current_receiving_SEQ-1)
 
-
     def close(self) -> None:
         """Cleans up. It should block (wait) until the Streamer is done with all
            the necessary ACKs and retransmissions"""
@@ -59,18 +61,18 @@ class Streamer:
         self.__send_fin()
         while not self.FIN:
             time.sleep(0.01)
-        # buffer in case second ACK dosn't make it
-        time.sleep(3)
+        # buffer in case second ACK doesn't make it
+        time.sleep(2)
         self.closed = True
         self.socket.stoprecv()
-        while not self.thread.done():
+        while not self.listen_thread.done():
             time.sleep(0.01)
         self.executor.shutdown()
 
     def listener(self):
         while not self.closed: 
             try:
-                data, addr = self.socket.recvfrom()
+                data = self.socket.recvfrom()[0]
                 self.__packet_handler(data)
             except Exception as e:
                 print("listener died!")
@@ -80,30 +82,42 @@ class Streamer:
 
 #### HELPERS #####
 
-    #### Self.send() helpers
+    #### Sending helpers
     # Breaks data up into pieces no largers than 's'
     # and returns a list of broken up pieces 
     def __byte_breaker(self, b: bytes, s: int):
         return [b[i:i+s] for i in range(0, len(b), s)]
+    
+    # Sends data and starts a timer 
+    def __recursive_send(self, seq):
+        to_send = self.sending_buffer[seq]
+        self.socket.sendto(to_send, (self.dst_ip, self.dst_port))
+        Timer(1, self.__selective_repeat, [seq]).start()
+        return
+
+    # Checks if ACK is received. Calls __recursive_send if not.
+    def __selective_repeat(self, seq):
+        if seq not in self.ACK:
+            return self.__recursive_send(seq)      
 
 
     #### Helpers for packing and unpacking data with structs
     # Packs a sequence number, data, ACK flag, and hash into a struct
     def __packer(self, seq, data, ack=False) -> struct:
-        f = f'i {len(data)}s b'
+        f = f'h {len(data)}s b'
         insecure_struct = struct.pack(f, seq, data, ack)
         secure_struct = self.__hash_pack(insecure_struct)
         return secure_struct
 
     # Unpacks a struct w/ a hash, sequence number, data, and ACK. Doesn't return the hash 
     def __unpacker(self, packed) -> tuple:
-        f = f'i i {len(packed)-9}s b'
+        f = f'i h {len(packed)-7}s b'
         return struct.unpack(f, packed)
 
     def __packet_handler(self, _data):
         if not _data:
             return
-        check, seq, seg, ack = self.__unpacker(_data)
+        seq, seg, ack = self.__unpacker(_data)[1:]
         if not self.__hash_check(_data):
             return 
         if ack:
@@ -119,28 +133,16 @@ class Streamer:
     #### Helpers for sending packets
     # Sends an ACK for a given seq number
     def __send_ACK(self, seq):
-        f = 'i s b'
+        f = 'h s b'
         s = struct.pack(f, seq, b'a', True)
         s = self.__hash_pack(s)
         self.socket.sendto(s, (self.dst_ip, self.dst_port))
 
-    # Waits until the current ACK arrives. Resends packet
-    # if it takes too long.
-    def __wait_ACK(self, data):
-        count = 0
-        while self.current_sending_SEQ not in self.ACK:
-            time.sleep(0.01)
-            count += 1
-            if count > 25:
-                self.send(data)
-                self.current_sending_SEQ -= 1
-                return
-
-
+ 
     #### Helpers for the FIN handshake
     # Sends a FIN message to indicate that we're done sending
     def __send_fin(self) -> None:
-        FIN = struct.pack('i 4s b', -1, b'done', False)
+        FIN = struct.pack('h 4s b', -1, b'done', False)
         FIN = self.__hash_pack(FIN)
         self.socket.sendto(FIN, (self.dst_ip, self.dst_port))
         self.__wait_fin_ACK()
@@ -167,6 +169,4 @@ class Streamer:
     def __hash_check(self, _data):
         expected = self.__unpacker(_data)[0]
         actual = adler32(_data[4:]) % 2147483647 
-        if expected != actual:
-            print('corrupt!')
         return expected == actual
